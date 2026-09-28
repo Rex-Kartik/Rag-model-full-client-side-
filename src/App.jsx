@@ -8,7 +8,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.mjs`;
 
 // We keep the axios api for Ollama fallback if needed, but RAG is 100% client-side now.
-const api = axios.create({ baseURL: 'http://localhost:8000' });
+const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' });
 
 function App() {
   const [chatHistory, setChatHistory] = useState([]);
@@ -22,12 +22,30 @@ function App() {
   const [showCitations, setShowCitations] = useState(true);
 
   // New Client-Side Vector DB State
-  const [clientVectorDb, setClientVectorDb] = useState([]);
+  const [clientVectorDb, setClientVectorDb] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('rag_clientVectorDb')) || []; } catch { return []; }
+  });
 
   // New Feature States
   const [toast, setToast] = useState(null); // { message, type: 'success' | 'error' }
-  const [uploadedDocs, setUploadedDocs] = useState([]);
+  const [uploadedDocs, setUploadedDocs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('rag_uploadedDocs')) || []; } catch { return []; }
+  });
   const [isDark, setIsDark] = useState(true);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('rag_clientVectorDb', JSON.stringify(clientVectorDb));
+    } catch (e) {
+      console.warn("Storage quota exceeded", e);
+    }
+  }, [clientVectorDb]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('rag_uploadedDocs', JSON.stringify(uploadedDocs));
+    } catch (e) {}
+  }, [uploadedDocs]);
   
   // LLM Engine Settings
   const [llmProvider, setLlmProvider] = useState('gemini'); // Changed to Gemini by default
@@ -37,6 +55,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   
   const chatFeedRef = useRef(null);
+  const wipeCounterRef = useRef(0);
 
   // Initialize and load status
   useEffect(() => {
@@ -67,6 +86,7 @@ function App() {
 
   const handleClearDB = async () => {
     if (!window.confirm("Are you sure you want to wipe the local Vector Database?")) return;
+    wipeCounterRef.current += 1;
     setClientVectorDb([]);
     setUploadedDocs([]);
     showToast("Knowledge base cleared.", "success");
@@ -119,9 +139,12 @@ function App() {
         }
       }
     });
-    const { data: { text } } = await worker.recognize(imageSource);
-    await worker.terminate();
-    return text;
+    try {
+      const { data: { text } } = await worker.recognize(imageSource);
+      return text;
+    } finally {
+      await worker.terminate();
+    }
   };
 
   const processPdfWithOcr = async (file) => {
@@ -194,6 +217,8 @@ function App() {
     setQuery('');
     setIsThinking(true);
 
+    const currentWipeCount = wipeCounterRef.current;
+
     try {
       // 1. Client-Side Retrieval
       let topChunks = [];
@@ -234,7 +259,8 @@ function App() {
           query: userMessage.text, 
           top_k: 3,
           provider: llmProvider,
-          model_name: llmModel
+          model_name: llmModel,
+          context: contextText
         });
         rawAnswer = response.data.answer;
       }
@@ -246,13 +272,19 @@ function App() {
         text: rawAnswer, 
         sources: topChunks.map((c, i) => ({ id: i+1, text: c.text, source: c.source })) 
       };
-      setChatHistory(prev => [...prev, aiMessage]);
+      if (wipeCounterRef.current === currentWipeCount) {
+        setChatHistory(prev => [...prev, aiMessage]);
+      }
     } catch (error) {
       console.error(error);
-      setChatHistory(prev => [...prev, { sender: 'ai', text: "Error generating response. Check your API key or model settings." }]);
+      if (wipeCounterRef.current === currentWipeCount) {
+        setChatHistory(prev => [...prev, { sender: 'ai', text: "Error generating response. Check your API key or model settings." }]);
+      }
       showToast("Failed to generate response.", "error");
     } finally {
-      setIsThinking(false);
+      if (wipeCounterRef.current === currentWipeCount) {
+        setIsThinking(false);
+      }
     }
   };
 
@@ -394,13 +426,13 @@ function App() {
           </div>
 
           <div className="bg-surface-container-low border border-surface-container-highest p-space-md rounded-xl shadow-sm flex flex-col gap-space-sm">
-            <label className={`p-space-lg rounded-lg border-2 border-dashed border-outline-variant/50 transition-colors flex flex-col items-center justify-center text-center ${isIngesting ? 'opacity-50 cursor-not-allowed bg-surface-container-lowest/60' : 'hover:bg-surface-container/40 hover:border-primary/50 cursor-pointer bg-surface-container-lowest/60'} group`}>
+            <label className={`focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 focus-within:ring-offset-surface-container-low p-space-lg rounded-lg border-2 border-dashed border-outline-variant/50 transition-colors flex flex-col items-center justify-center text-center ${isIngesting ? 'opacity-50 cursor-not-allowed bg-surface-container-lowest/60' : 'hover:bg-surface-container/40 hover:border-primary/50 cursor-pointer bg-surface-container-lowest/60'} group`}>
               <div className="w-10 h-10 rounded-full bg-surface-container-high flex items-center justify-center text-primary group-hover:bg-primary-container group-hover:text-on-primary-container transition-colors mb-space-xs">
                 <span className="material-symbols-outlined text-[22px]">cloud_upload</span>
               </div>
               <span className="font-label-md text-label-md text-on-surface">Click to upload File</span>
               <span className="font-body-sm text-body-sm text-outline mt-0.5">PDF, TXT, PNG, JPG</span>
-              <input type="file" className="hidden" accept=".pdf,.txt,.md,.png,.jpg,.jpeg" onChange={handleFileUpload} disabled={isIngesting} />
+              <input type="file" className="sr-only" accept=".pdf,.txt,.md,.png,.jpg,.jpeg" onChange={handleFileUpload} disabled={isIngesting} />
             </label>
 
             {isIngesting && ocrProgress.status && (
@@ -449,10 +481,10 @@ function App() {
                 <span className="px-2 py-0.5 rounded bg-surface-container-high text-tertiary font-code-sm text-code-sm">{uploadedDocs.length} Docs</span>
               </div>
               <div className="flex flex-col gap-2 max-h-60 overflow-y-auto pr-1">
-                {uploadedDocs.map((docName, idx) => (
+                {uploadedDocs.map((doc, idx) => (
                   <div key={idx} className="flex items-center gap-space-sm p-space-sm bg-surface-container rounded-lg hover:bg-surface-container-high transition-colors">
                     <span className="material-symbols-outlined text-outline text-[18px] shrink-0">draft</span>
-                    <span className="font-body-sm text-body-sm text-on-surface truncate flex-1" title={docName}>{docName}</span>
+                    <span className="font-body-sm text-body-sm text-on-surface truncate flex-1" title={doc.source}>{doc.source}</span>
                   </div>
                 ))}
               </div>
