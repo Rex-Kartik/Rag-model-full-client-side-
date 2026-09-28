@@ -48,12 +48,19 @@ function App() {
   }, [uploadedDocs]);
   
   // LLM Engine Settings
-  const [llmProvider, setLlmProvider] = useState('gemini'); // Changed to Gemini by default
-  const [llmModel, setLlmModel] = useState('gemini-1.5-flash');
-  const [llmBaseUrl, setLlmBaseUrl] = useState('https://openrouter.ai/api/v1');
-  const [llmApiKey, setLlmApiKey] = useState('');
-  const [showSettings, setShowSettings] = useState(false);
+  const [llmModel, setLlmModel] = useState(() => localStorage.getItem('rag_llmModel') || 'gemini-1.5-flash');
+  const [llmApiKey, setLlmApiKey] = useState(() => localStorage.getItem('rag_llmApiKey') || '');
+  const [isSettingsValid, setIsSettingsValid] = useState(() => localStorage.getItem('rag_settingsValid') === 'true');
+  const [showSettings, setShowSettings] = useState(() => !(localStorage.getItem('rag_settingsValid') === 'true'));
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationError, setValidationError] = useState('');
   
+  useEffect(() => {
+    localStorage.setItem('rag_llmModel', llmModel);
+    localStorage.setItem('rag_llmApiKey', llmApiKey);
+    localStorage.setItem('rag_settingsValid', isSettingsValid);
+  }, [llmModel, llmApiKey, isSettingsValid]);
+
   const chatFeedRef = useRef(null);
   const wipeCounterRef = useRef(0);
 
@@ -78,6 +85,36 @@ function App() {
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
+  };
+
+  const handleSaveSettings = async () => {
+    setIsValidating(true);
+    setValidationError('');
+    try {
+      if (!llmApiKey.trim()) throw new Error('API Key cannot be empty.');
+      if (!llmModel.trim()) throw new Error('Model Name cannot be empty.');
+      
+      const genAI = new GoogleGenerativeAI(llmApiKey.trim());
+      const model = genAI.getGenerativeModel({ model: llmModel.trim() });
+      await model.generateContent("Test");
+      
+      setIsSettingsValid(true);
+      setShowSettings(false);
+      showToast("Settings validated and saved!", "success");
+    } catch (error) {
+      console.error(error);
+      const msg = error.message.toLowerCase();
+      if (msg.includes('api key not valid') || msg.includes('400') || msg.includes('key')) {
+        setValidationError("Invalid API Key. Please check your key and try again.");
+      } else if (msg.includes('not found') || msg.includes('404') || msg.includes('model')) {
+        setValidationError(`Model '${llmModel}' not found. Please check the model name.`);
+      } else {
+        setValidationError(`Validation failed: ${error.message}`);
+      }
+      setIsSettingsValid(false);
+    } finally {
+      setIsValidating(false);
+    }
   };
 
   const fetchStatus = async () => {
@@ -237,33 +274,10 @@ function App() {
 
       // 2. Direct LLM Call
       let rawAnswer = "";
-      if (llmProvider === 'gemini') {
-        const genAI = new GoogleGenerativeAI(llmApiKey || 'dummy');
-        const model = genAI.getGenerativeModel({ model: llmModel || "gemini-1.5-flash" });
-        const result = await model.generateContent(prompt);
-        rawAnswer = result.response.text();
-      } else if (llmProvider === 'omniroute') {
-        const res = await fetch(`${llmBaseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${llmApiKey}` },
-          body: JSON.stringify({
-            model: llmModel,
-            messages: [{ role: 'user', content: prompt }]
-          })
-        });
-        const data = await res.json();
-        rawAnswer = data.choices[0].message.content;
-      } else {
-        // Fallback to local Ollama via backend proxy (to avoid CORS)
-        const response = await api.post('/api/chat', { 
-          query: userMessage.text, 
-          top_k: 3,
-          provider: llmProvider,
-          model_name: llmModel,
-          context: contextText
-        });
-        rawAnswer = response.data.answer;
-      }
+      const genAI = new GoogleGenerativeAI(llmApiKey || 'dummy');
+      const model = genAI.getGenerativeModel({ model: llmModel || "gemini-1.5-flash" });
+      const result = await model.generateContent(prompt);
+      rawAnswer = result.response.text();
 
       rawAnswer = rawAnswer.replace(/^(According to the retrieved context,|According to the context,|Based on the provided context,|Based on the context,)\s*/i, '');
       
@@ -309,23 +323,17 @@ function App() {
               <h2 className="font-headline-sm text-headline-sm text-on-surface flex items-center gap-2">
                 <span className="material-symbols-outlined text-primary">settings</span> LLM Configuration
               </h2>
-              <button onClick={() => setShowSettings(false)} className="text-outline hover:text-on-surface">
-                <span className="material-symbols-outlined">close</span>
-              </button>
+              {isSettingsValid && (
+                <button onClick={() => setShowSettings(false)} className="text-outline hover:text-on-surface">
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              )}
             </div>
             
             <div className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1">
-                <label className="font-label-md text-label-md text-on-surface">Provider</label>
-                <select 
-                  value={llmProvider} 
-                  onChange={(e) => setLlmProvider(e.target.value)}
-                  className="bg-surface-container text-on-surface p-2 rounded outline-none border border-outline-variant focus:border-primary"
-                >
-                  <option value="gemini">Google Gemini (Client-Side)</option>
-                  <option value="ollama">Local (Ollama)</option>
-                  <option value="omniroute">Cloud (Omniroute / OpenRouter)</option>
-                </select>
+              <div className="flex flex-col gap-1 text-sm text-on-surface-variant bg-surface-container-high p-3 rounded-lg mb-2">
+                <p>This workspace connects directly to Google Gemini from your browser.</p>
+                <p className="mt-1">Provide your model and API key below to continue.</p>
               </div>
 
               <div className="flex flex-col gap-1">
@@ -334,44 +342,37 @@ function App() {
                   type="text" 
                   value={llmModel} 
                   onChange={(e) => setLlmModel(e.target.value)}
-                  placeholder={llmProvider === 'ollama' ? "e.g., llama3, qwen2:1.5b" : llmProvider === 'gemini' ? "e.g., gemini-1.5-flash" : "e.g., meta-llama/llama-3-8b-instruct"}
+                  placeholder="e.g., gemini-1.5-flash"
                   className="bg-surface-container text-on-surface p-2 rounded outline-none border border-outline-variant focus:border-primary"
                 />
               </div>
 
-              {llmProvider !== 'ollama' && (
-                <>
-                  {llmProvider === 'omniroute' && (
-                    <div className="flex flex-col gap-1">
-                      <label className="font-label-md text-label-md text-on-surface">Base URL</label>
-                      <input 
-                        type="text" 
-                        value={llmBaseUrl} 
-                        onChange={(e) => setLlmBaseUrl(e.target.value)}
-                        placeholder="https://openrouter.ai/api/v1"
-                        className="bg-surface-container text-on-surface p-2 rounded outline-none border border-outline-variant focus:border-primary"
-                      />
-                    </div>
-                  )}
-                  <div className="flex flex-col gap-1">
-                    <label className="font-label-md text-label-md text-on-surface">API Key</label>
-                    <input 
-                      type="password" 
-                      value={llmApiKey} 
-                      onChange={(e) => setLlmApiKey(e.target.value)}
-                      placeholder="Enter API Key here..."
-                      className="bg-surface-container text-on-surface p-2 rounded outline-none border border-outline-variant focus:border-primary"
-                    />
-                  </div>
-                </>
-              )}
+              <div className="flex flex-col gap-1">
+                <label className="font-label-md text-label-md text-on-surface">API Key</label>
+                <input 
+                  type="password" 
+                  value={llmApiKey} 
+                  onChange={(e) => setLlmApiKey(e.target.value)}
+                  placeholder="Enter Gemini API Key here..."
+                  className="bg-surface-container text-on-surface p-2 rounded outline-none border border-outline-variant focus:border-primary"
+                />
+              </div>
             </div>
 
+            {validationError && (
+              <div className="text-error font-body-sm text-body-sm p-2 bg-error/10 rounded border border-error/30 flex items-center gap-2 mt-1">
+                <span className="material-symbols-outlined text-[16px]">error</span>
+                {validationError}
+              </div>
+            )}
+
             <button 
-              onClick={() => setShowSettings(false)}
-              className="mt-2 w-full py-2 bg-primary hover:bg-primary-container text-on-primary font-label-md rounded-lg transition-colors"
+              onClick={handleSaveSettings}
+              disabled={isValidating}
+              className="mt-2 w-full py-2 bg-primary hover:bg-primary-container text-on-primary font-label-md rounded-lg transition-colors flex justify-center items-center gap-2 disabled:opacity-70"
             >
-              Save & Close
+              {isValidating && <span className="material-symbols-outlined animate-spin text-[16px]">sync</span>}
+              {isValidating ? "Validating Connection..." : "Save & Close"}
             </button>
           </div>
         </div>
@@ -523,7 +524,7 @@ function App() {
                 onClick={() => setShowSettings(true)}
                 className="px-space-sm py-0.5 rounded bg-surface-container-high hover:bg-surface-container-highest transition-colors text-primary font-code-sm text-code-sm flex items-center gap-1"
               >
-                <span className="material-symbols-outlined text-[14px]">smart_toy</span> {llmModel} ({llmProvider})
+                <span className="material-symbols-outlined text-[14px]">smart_toy</span> {llmModel} (Google Gemini)
               </button>
               <div className="ml-auto flex items-center gap-1 cursor-pointer hover:bg-surface-container-highest px-2 py-1 rounded transition-colors text-outline font-label-code text-label-code" onClick={() => setShowCitations(!showCitations)}>
                 <span className={`material-symbols-outlined text-[14px] ${showCitations ? 'text-secondary' : 'text-outline'}`}>
